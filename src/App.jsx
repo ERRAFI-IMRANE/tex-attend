@@ -33,23 +33,10 @@ export default function App() {
         top: 0,
         zIndex: 100,
       }}>
-        <div style={{ color: "#fff", fontSize: "20px" }}>
-          AXA App
-        </div>
-
-        <div style={{ display: "flex", gap: "10px" }}>
-          <Link to="/" style={linkStyle("/")}>
-            Dashboard
-          </Link>
-          <Link to="/scanner" style={linkStyle("/scanner")}>
-            Scanner
-          </Link>
-        </div>
       </nav>
 
       <Routes>
         <Route path="/" element={<Dashboard />} />
-        <Route path="/scanner" element={<Scanner />} />
       </Routes>
     </div>
   );
