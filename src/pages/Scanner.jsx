@@ -1,114 +1,93 @@
 // src/pages/Scanner.jsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { rtdb } from "../firebase";
-import { ref, runTransaction, push } from "firebase/database";
+import { ref, runTransaction } from "firebase/database";
 import { Html5Qrcode } from "html5-qrcode";
 
-const SCAN_COOLDOWN_MS = 2500; // prevent double-scans
+const QR_BOX_SIZE = 260;
 
 export default function Scanner() {
-  const [status, setStatus] = useState("idle"); // idle | success | error
-  const [lastCount, setLastCount] = useState(null);
-  const [scanLog, setScanLog] = useState([]);
-  const [cameraError, setCameraError] = useState(null);
+  const [status, setStatus] = useState("idle"); // idle | success
+  const [count, setCount] = useState(null);
   const [isRunning, setIsRunning] = useState(false);
+  const [cameraError, setCameraError] = useState(null);
+  const [pressing, setPressing] = useState(false);
+
   const scannerRef = useRef(null);
-  const lastScanTime = useRef(0);
-  const processingRef = useRef(false);
+  const isRunningRef = useRef(false);
+  const cooldownRef = useRef(false);
 
-  const handleScan = async (decodedText) => {
-    const now = Date.now();
-    if (processingRef.current || now - lastScanTime.current < SCAN_COOLDOWN_MS) return;
-
-    processingRef.current = true;
-    lastScanTime.current = now;
+  const handleBadgeScan = async () => {
+    if (cooldownRef.current) return;
+    cooldownRef.current = true;
+    setPressing(true);
 
     try {
-      // Increment attendance count atomically
       let newCount = null;
       await runTransaction(ref(rtdb, "attendance/count"), (current) => {
         newCount = (current || 0) + 1;
         return newCount;
       });
-
-      // Log the scan
-      await push(ref(rtdb, "scans"), {
-        timestamp: Date.now(),
-        number: newCount,
-        qrData: decodedText.substring(0, 40), // store partial for reference
-      });
-
-      setLastCount(newCount);
+      setCount(newCount);
       setStatus("success");
-      setScanLog((prev) => [
-        { time: new Date().toLocaleTimeString(), number: newCount },
-        ...prev.slice(0, 9),
-      ]);
     } catch (err) {
       console.error(err);
-      setStatus("error");
     }
 
     setTimeout(() => {
       setStatus("idle");
-      processingRef.current = false;
-    }, SCAN_COOLDOWN_MS);
+      setPressing(false);
+      cooldownRef.current = false;
+    }, 2000);
   };
 
-  const startScanner = async () => {
-    if (scannerRef.current) return;
-
-    try {
-      const scanner = new Html5Qrcode("qr-reader");
-      scannerRef.current = scanner;
-
-      const cameras = await Html5Qrcode.getCameras();
-      if (!cameras.length) throw new Error("No camera found");
-
-      // Prefer back camera
-      const backCam = cameras.find((c) => /back|rear|environment/i.test(c.label)) || cameras[cameras.length - 1];
-
-      await scanner.start(
-        backCam.id,
-        { fps: 10, qrbox: { width: 260, height: 260 }, aspectRatio: 1 },
-        handleScan,
-        () => {}
-      );
-
-      setIsRunning(true);
-      setCameraError(null);
-    } catch (err) {
-      console.error(err);
-      setCameraError(err.message || "Camera access denied. Please allow camera permissions.");
-    }
-  };
-
-  const stopScanner = async () => {
-    if (scannerRef.current) {
-      await scannerRef.current.stop();
+  const stopScanner = useCallback(async () => {
+    if (scannerRef.current && isRunningRef.current) {
+      try { await scannerRef.current.stop(); } catch (_) {}
       scannerRef.current = null;
+      isRunningRef.current = false;
       setIsRunning(false);
-      setStatus("idle");
     }
-  };
-
-  useEffect(() => {
-    startScanner();
-    return () => {
-      if (scannerRef.current) {
-        scannerRef.current.stop().catch(() => {});
-        scannerRef.current = null;
-      }
-    };
   }, []);
 
-  const statusConfig = {
-    idle: { color: "#333", bg: "#111", text: "READY TO SCAN", border: "#333" },
-    success: { color: "#00e676", bg: "#001a0d", text: `✓ CHECKED IN  #${String(lastCount).padStart(3, "0")}`, border: "#00e676" },
-    error: { color: "#e62b1e", bg: "#1a0000", text: "✗ SCAN FAILED", border: "#e62b1e" },
-  };
+  const startScanner = useCallback(async () => {
+    if (isRunningRef.current || scannerRef.current) return;
+    const el = document.getElementById("qr-reader");
+    if (!el) return;
+    setCameraError(null);
 
-  const s = statusConfig[status];
+    const tryStart = async (facingMode) => {
+      const scanner = new Html5Qrcode("qr-reader");
+      scannerRef.current = scanner;
+      await scanner.start(
+        { facingMode },
+        { fps: 10, qrbox: { width: QR_BOX_SIZE, height: QR_BOX_SIZE } },
+        () => {}, // we ignore auto-scans — button only
+        () => {}
+      );
+      isRunningRef.current = true;
+      setIsRunning(true);
+    };
+
+    try {
+      await tryStart("environment");
+    } catch {
+      try {
+        await tryStart("user");
+      } catch {
+        scannerRef.current = null;
+        setCameraError("Camera not accessible. Allow camera permission and use HTTPS.");
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    const t = setTimeout(() => startScanner(), 400);
+    return () => { clearTimeout(t); stopScanner(); };
+  }, [startScanner, stopScanner]);
+
+  const isSuccess = status === "success";
+  const squareColor = isSuccess ? "#00e676" : "#e62b1e";
 
   return (
     <div style={{
@@ -117,190 +96,196 @@ export default function Scanner() {
       display: "flex",
       flexDirection: "column",
       alignItems: "center",
-      padding: "2rem 1rem",
+      justifyContent: "center",
+      padding: "1.5rem 1rem",
       gap: "1.5rem",
+      fontFamily: "'Bebas Neue', sans-serif",
     }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&display=swap');
 
-        #qr-reader { background: transparent !important; border: none !important; }
-        #qr-reader video { border-radius: 12px; }
-        #qr-reader__scan_region { background: transparent !important; }
-        #qr-reader__dashboard { display: none !important; }
+        #qr-reader { width:100%!important; border:none!important; background:transparent!important; }
+        #qr-reader video { width:100%!important; height:100%!important; object-fit:cover!important; display:block!important; }
+        #qr-reader__scan_region { width:100%!important; background:transparent!important; }
+        #qr-reader__scan_region img { display:none!important; }
+        #qr-reader__dashboard { display:none!important; }
+        #qr-reader__status_span { display:none!important; }
 
         @keyframes scanLine {
-          0% { top: 0%; }
-          100% { top: 100%; }
+          0%   { top: calc(50% - 130px); opacity:0; }
+          10%  { opacity:1; }
+          90%  { opacity:1; }
+          100% { top: calc(50% + 128px); opacity:0; }
         }
-        @keyframes successPop {
-          0% { transform: scale(0.95); }
-          50% { transform: scale(1.03); }
+        @keyframes successRing {
+          0%   { box-shadow: 0 0 0px 0px #00e67600; }
+          50%  { box-shadow: 0 0 0px 12px #00e67633; }
+          100% { box-shadow: 0 0 0px 0px #00e67600; }
+        }
+        @keyframes popIn {
+          0%   { transform: scale(0.85); opacity:0; }
+          60%  { transform: scale(1.06); opacity:1; }
           100% { transform: scale(1); }
         }
+        @keyframes btnPress {
+          0%   { transform: scale(1); }
+          40%  { transform: scale(0.93); }
+          100% { transform: scale(1); }
+        }
+        @keyframes cornerBlink {
+          0%,100% { opacity:1; }
+          50%     { opacity:0.3; }
+        }
+        .scan-btn {
+          position: relative;
+          overflow: hidden;
+          cursor: pointer;
+          user-select: none;
+          -webkit-tap-highlight-color: transparent;
+          transition: filter 0.15s;
+        }
+        .scan-btn:active { filter: brightness(0.85); }
+        .scan-btn::after {
+          content:'';
+          position:absolute;
+          inset:0;
+          background: radial-gradient(circle at center, rgba(255,255,255,0.18) 0%, transparent 70%);
+          opacity:0;
+          transition: opacity 0.2s;
+        }
+        .scan-btn:active::after { opacity:1; }
       `}</style>
 
-      <p style={{
-        color: "#e62b1e",
-        fontSize: "1.1rem",
-        letterSpacing: "0.4em",
-        fontFamily: "'Bebas Neue', sans-serif",
-        margin: 0,
-      }}>
+      <p style={{ color:"#e62b1e", fontSize:"1rem", letterSpacing:"0.4em", margin:0 }}>
         WELCOME DESK — SCANNER
       </p>
 
-      {/* Camera viewport */}
+      {/* ── Camera viewport ── */}
       <div style={{
         position: "relative",
-        width: "min(90vw, 360px)",
-        borderRadius: "16px",
+        width: "min(88vw, 340px)",
+        height: "min(88vw, 340px)",
+        borderRadius: "18px",
         overflow: "hidden",
-        border: `2px solid ${s.border}`,
-        background: "#111",
-        boxShadow: status === "success"
-          ? "0 0 40px #00e67644"
-          : status === "error"
-          ? "0 0 40px #e62b1e44"
-          : "0 0 20px #00000088",
-        transition: "border-color 0.3s, box-shadow 0.3s",
-        animation: status === "success" ? "successPop 0.3s ease" : "none",
+        background: "#0d0d0d",
+        animation: isSuccess ? "successRing 0.6s ease" : "none",
       }}>
-        <div id="qr-reader" style={{ width: "100%", minHeight: "300px" }} />
+        <div id="qr-reader" style={{ width:"100%", height:"100%" }} />
 
-        {/* Scan guide corners */}
-        {["topleft", "topright", "bottomleft", "bottomright"].map((pos) => (
-          <div key={pos} style={{
-            position: "absolute",
-            width: "24px",
-            height: "24px",
-            borderColor: s.border === "#333" ? "#e62b1e" : s.border,
-            borderStyle: "solid",
-            borderWidth: 0,
-            ...(pos.includes("top") ? { top: "20px", borderTopWidth: "3px" } : { bottom: "20px", borderBottomWidth: "3px" }),
-            ...(pos.includes("left") ? { left: "20px", borderLeftWidth: "3px" } : { right: "20px", borderRightWidth: "3px" }),
-            transition: "border-color 0.3s",
-            borderRadius: "2px",
+        {/* Dark vignette — transparent centre */}
+        <div style={{
+          position:"absolute", inset:0, pointerEvents:"none",
+          background:`
+            linear-gradient(rgba(0,0,0,0.7),rgba(0,0,0,0.7)) top    / 100% calc(50% - 130px) no-repeat,
+            linear-gradient(rgba(0,0,0,0.7),rgba(0,0,0,0.7)) bottom / 100% calc(50% - 130px) no-repeat,
+            linear-gradient(rgba(0,0,0,0.7),rgba(0,0,0,0.7)) left   / calc(50% - 130px) 100% no-repeat,
+            linear-gradient(rgba(0,0,0,0.7),rgba(0,0,0,0.7)) right  / calc(50% - 130px) 100% no-repeat
+          `,
+        }} />
+
+        {/* Square border */}
+        <div style={{
+          position:"absolute", top:"50%", left:"50%",
+          transform:"translate(-50%,-50%)",
+          width:`${QR_BOX_SIZE}px`, height:`${QR_BOX_SIZE}px`,
+          border:`2px solid ${squareColor}`,
+          borderRadius:"8px", pointerEvents:"none",
+          transition:"border-color 0.3s, box-shadow 0.3s",
+          boxShadow: isSuccess ? `0 0 20px ${squareColor}66` : "none",
+        }} />
+
+        {/* Corner L-brackets */}
+        {[
+          { top:"calc(50% - 130px)", left:"calc(50% - 130px)", borderTop:`3px solid ${squareColor}`, borderLeft:`3px solid ${squareColor}` },
+          { top:"calc(50% - 130px)", left:"calc(50% + 106px)", borderTop:`3px solid ${squareColor}`, borderRight:`3px solid ${squareColor}` },
+          { top:"calc(50% + 106px)", left:"calc(50% - 130px)", borderBottom:`3px solid ${squareColor}`, borderLeft:`3px solid ${squareColor}` },
+          { top:"calc(50% + 106px)", left:"calc(50% + 106px)", borderBottom:`3px solid ${squareColor}`, borderRight:`3px solid ${squareColor}` },
+        ].map((s, i) => (
+          <div key={i} style={{
+            position:"absolute", width:"26px", height:"26px",
+            pointerEvents:"none", transition:"border-color 0.3s",
+            animation: !isSuccess ? `cornerBlink 2s ease-in-out ${i*0.2}s infinite` : "none",
+            ...s,
           }} />
         ))}
 
-        {/* Scan animation line */}
-        {isRunning && status === "idle" && (
+        {/* Scan line — idle only */}
+        {isRunning && !isSuccess && (
           <div style={{
-            position: "absolute",
-            left: "10%",
-            right: "10%",
-            height: "2px",
-            background: "linear-gradient(90deg, transparent, #e62b1e, transparent)",
-            animation: "scanLine 2s linear infinite",
-            pointerEvents: "none",
+            position:"absolute",
+            left:"calc(50% - 124px)", width:"248px", height:"2px",
+            background:"linear-gradient(90deg, transparent, #e62b1e, transparent)",
+            animation:"scanLine 2.2s ease-in-out infinite",
+            pointerEvents:"none",
           }} />
+        )}
+
+        {/* Success tick overlay */}
+        {isSuccess && (
+          <div style={{
+            position:"absolute", top:"50%", left:"50%",
+            transform:"translate(-50%,-50%)",
+            width:`${QR_BOX_SIZE}px`, height:`${QR_BOX_SIZE}px`,
+            display:"flex", alignItems:"center", justifyContent:"center",
+            background:"#00e67618", borderRadius:"8px",
+            animation:"popIn 0.35s ease",
+            pointerEvents:"none",
+          }}>
+            <span style={{ fontSize:"4rem", lineHeight:1 }}>✓</span>
+          </div>
         )}
       </div>
 
       {/* Camera error */}
       {cameraError && (
-        <div style={{
-          background: "#1a0000",
-          border: "1px solid #e62b1e",
-          borderRadius: "10px",
-          padding: "1rem 1.5rem",
-          color: "#e62b1e",
-          fontFamily: "monospace",
-          fontSize: "0.85rem",
-          maxWidth: "360px",
-          textAlign: "center",
-        }}>
+        <div style={{ background:"#1a0000", border:"1px solid #e62b1e", borderRadius:"10px", padding:"0.8rem 1.2rem", color:"#e62b1e", fontFamily:"monospace", fontSize:"0.78rem", maxWidth:"340px", textAlign:"center" }}>
           ⚠ {cameraError}
         </div>
       )}
 
-      {/* Status badge */}
-      <div style={{
-        padding: "0.8rem 2rem",
-        borderRadius: "8px",
-        background: s.bg,
-        border: `1px solid ${s.border}`,
-        color: s.color,
-        fontFamily: "'Bebas Neue', sans-serif",
-        fontSize: "1.4rem",
-        letterSpacing: "0.15em",
-        minWidth: "260px",
-        textAlign: "center",
-        transition: "all 0.3s ease",
-      }}>
-        {s.text}
-      </div>
+      {/* ── BIG SCAN BADGE BUTTON ── */}
+      <button
+        className="scan-btn"
+        onClick={handleBadgeScan}
+        disabled={!isRunning || cooldownRef.current}
+        style={{
+          width: "min(88vw, 340px)",
+          padding: "1.2rem 0",
+          borderRadius: "14px",
+          border: isSuccess ? "2px solid #00e676" : "2px solid #e62b1e",
+          background: isSuccess
+            ? "linear-gradient(135deg, #003d1a, #005c28)"
+            : pressing
+            ? "linear-gradient(135deg, #b01e14, #e62b1e)"
+            : "linear-gradient(135deg, #e62b1e, #ff4433)",
+          color: "#fff",
+          fontSize: "1.8rem",
+          letterSpacing: "0.2em",
+          fontFamily: "'Bebas Neue', sans-serif",
+          boxShadow: isSuccess
+            ? "0 0 24px #00e67644"
+            : "0 4px 24px #e62b1e55",
+          transition: "all 0.25s ease",
+          animation: pressing ? "btnPress 0.25s ease" : "none",
+        }}
+      >
+        {isSuccess
+          ? `✓  CHECKED IN — #${String(count).padStart(3, "0")}`
+          : "⬡  SCAN BADGE"}
+      </button>
 
-      {/* Controls */}
-      <div style={{ display: "flex", gap: "1rem" }}>
+      {/* Start / Stop camera */}
+      <div style={{ display:"flex", gap:"0.75rem" }}>
         {!isRunning ? (
-          <button onClick={startScanner} style={{
-            background: "#e62b1e",
-            color: "#fff",
-            border: "none",
-            borderRadius: "8px",
-            padding: "0.7rem 1.8rem",
-            fontSize: "1rem",
-            fontFamily: "'Bebas Neue', sans-serif",
-            letterSpacing: "0.15em",
-            cursor: "pointer",
-          }}>
+          <button onClick={startScanner} style={{ background:"#1a1a1a", color:"#e62b1e", border:"1px solid #e62b1e", borderRadius:"8px", padding:"0.55rem 1.5rem", fontSize:"0.85rem", fontFamily:"'Bebas Neue', sans-serif", letterSpacing:"0.15em", cursor:"pointer" }}>
             START CAMERA
           </button>
         ) : (
-          <button onClick={stopScanner} style={{
-            background: "transparent",
-            color: "#555",
-            border: "1px solid #333",
-            borderRadius: "8px",
-            padding: "0.7rem 1.8rem",
-            fontSize: "1rem",
-            fontFamily: "'Bebas Neue', sans-serif",
-            letterSpacing: "0.15em",
-            cursor: "pointer",
-          }}>
-            STOP
+          <button onClick={stopScanner} style={{ background:"transparent", color:"#444", border:"1px solid #222", borderRadius:"8px", padding:"0.55rem 1.5rem", fontSize:"0.85rem", fontFamily:"'Bebas Neue', sans-serif", letterSpacing:"0.15em", cursor:"pointer" }}>
+            STOP CAMERA
           </button>
         )}
       </div>
-
-      {/* Scan log */}
-      {scanLog.length > 0 && (
-        <div style={{
-          width: "min(90vw, 360px)",
-          background: "#111",
-          border: "1px solid #1e1e1e",
-          borderRadius: "12px",
-          overflow: "hidden",
-        }}>
-          <div style={{
-            padding: "0.6rem 1.25rem",
-            borderBottom: "1px solid #1e1e1e",
-            color: "#555",
-            fontSize: "0.7rem",
-            letterSpacing: "0.3em",
-            fontFamily: "'Bebas Neue', sans-serif",
-          }}>
-            THIS SESSION
-          </div>
-          {scanLog.map((entry, i) => (
-            <div key={i} style={{
-              display: "flex",
-              justifyContent: "space-between",
-              padding: "0.55rem 1.25rem",
-              borderBottom: i < scanLog.length - 1 ? "1px solid #161616" : "none",
-              background: i === 0 ? "#001a0d" : "transparent",
-            }}>
-              <span style={{ color: i === 0 ? "#00e676" : "#444", fontFamily: "monospace", fontSize: "0.8rem" }}>
-                ✓ Attendee #{String(entry.number).padStart(3, "0")}
-              </span>
-              <span style={{ color: "#333", fontFamily: "monospace", fontSize: "0.75rem" }}>
-                {entry.time}
-              </span>
-            </div>
-          ))}
-        </div>
-      )}
     </div>
   );
 }
