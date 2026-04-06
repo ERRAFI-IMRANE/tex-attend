@@ -2,6 +2,7 @@
 import { useEffect, useState, useRef } from "react";
 import { rtdb } from "../firebase";
 import { ref, onValue } from "firebase/database";
+import logo from "../imgs/logo-white.png"; // change path if needed
 
 export default function Dashboard() {
   const [count, setCount] = useState(0);
@@ -68,15 +69,6 @@ export default function Dashboard() {
       position: "relative",
       overflow: "hidden",
     }}>
-      {/* Background grid */}
-      <div style={{
-        position: "absolute",
-        inset: 0,
-        backgroundImage: "linear-gradient(#ffffff08 1px, transparent 1px), linear-gradient(90deg, #ffffff08 1px, transparent 1px)",
-        backgroundSize: "60px 60px",
-        pointerEvents: "none",
-      }} />
-
       {/* Red accent line */}
       <div style={{
         position: "absolute",
@@ -87,6 +79,17 @@ export default function Dashboard() {
         height: "120px",
         background: "linear-gradient(to bottom, #e62b1e, transparent)",
       }} />
+
+      {/* Logo */}
+      <img
+        src={logo}
+        alt="TEDxESTS"
+        style={{
+          width: "700px",
+          marginBottom: "1.5rem",
+          filter: "drop-shadow(0 0 10px #e62b1e55)",
+        }}
+      />
 
       {/* Label */}
       <p style={{
